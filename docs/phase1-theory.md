@@ -2,7 +2,7 @@
 
 A standalone deep-dive. All examples use generic domains (Book/Author, Customer/Order, Product, Employee/Department) so the concepts stay separated from any specific project.
 
-Read this when you have time. By the end, you should be able to talk fluently about every concept here without hedging.
+Each chapter ends with **10 self-quiz questions** with short answers. Cover the answer, ask yourself the question, then check. By the end of all chapters you should be able to answer ~80 questions without hedging.
 
 ---
 
@@ -12,12 +12,13 @@ Read this when you have time. By the end, you should be able to talk fluently ab
 2. [Entities — Java classes mapped to tables](#2-entities--java-classes-mapped-to-tables)
 3. [The persistence context — Hibernate's working memory](#3-the-persistence-context--hibernates-working-memory)
 4. [Spring Data repositories](#4-spring-data-repositories)
-5. [Transactions](#5-transactions--the-core-mental-model)
-6. [Fetch types, lazy/eager, OSIV, N+1](#6-fetch-types-lazyeager-osiv-n1)
-7. [Flyway — schema as code](#7-flyway--schema-as-code)
-8. [Common errors and what they mean](#8-common-errors-and-what-they-mean)
-9. [Interview probes you should be ready for](#9-interview-probes-you-should-be-ready-for)
-10. [Glossary](#10-glossary)
+5. [DTOs and DAOs](#5-dtos-and-daos)
+6. [Transactions](#6-transactions--the-core-mental-model)
+7. [Fetch types, lazy/eager, OSIV, N+1](#7-fetch-types-lazyeager-osiv-n1)
+8. [Flyway — schema as code](#8-flyway--schema-as-code)
+9. [Common errors and what they mean](#9-common-errors-and-what-they-mean)
+10. [Interview probes you should be ready for](#10-interview-probes-you-should-be-ready-for)
+11. [Glossary](#11-glossary)
 
 ---
 
@@ -64,10 +65,6 @@ For every entity, you wrote ~50 lines of this. Plus connection handling, transac
 └─────────────────────────────────────────────┘
 ```
 
-**Interview probe**: *"Spring Data, JPA, Hibernate — what's the difference?"*
-
-> JPA is the specification, Hibernate is the implementation, Spring Data is the repository abstraction on top. JPA defines what an `EntityManager` looks like; Hibernate provides a working one; Spring Data wraps it with auto-generated repositories.
-
 ### Mental model: who does what when you call `bookRepo.save(book)`
 
 1. **Spring Data** receives the call, delegates to the generic implementation it generated for your interface.
@@ -77,6 +74,48 @@ For every entity, you wrote ~50 lines of this. Plus connection handling, transac
 5. JDBC sends bytes to the Postgres driver, which sends them over TCP to the DB.
 
 Four layers. Each one a real abstraction with a real purpose.
+
+### Why this layering matters
+
+Each layer can be swapped without rewriting the layers above:
+
+- Switch from Postgres to MySQL → change the JDBC driver. Above stays the same.
+- Switch from Hibernate to EclipseLink → change one Maven dep. Your `@Entity` classes don't change because they use JPA annotations, not Hibernate-specific ones.
+- Stop using Spring Data → write `EntityManager` code directly. Your entities and queries still work.
+
+Stability of the **interface** (JPA) is what lets the **implementations** (Hibernate, EclipseLink) compete.
+
+### Chapter 1 — 10 self-quiz questions
+
+1. **What is JPA, in one sentence?**
+   The Jakarta Persistence API — a Java specification for ORM, defining annotations, the `EntityManager`, JPQL, and transactions. It's interfaces only, no implementation.
+
+2. **What is Hibernate?**
+   A library that *implements* the JPA specification. The default ORM in Spring Boot.
+
+3. **What is Spring Data JPA?**
+   A library that sits on top of JPA and lets you declare repository interfaces; Spring generates the implementations.
+
+4. **List the four layers from your code down to the database.**
+   Spring Data JPA → JPA (spec, with Hibernate as implementation) → JDBC → DB driver/network.
+
+5. **Name two JPA implementations other than Hibernate.**
+   EclipseLink and OpenJPA. (Both rarely used in modern Spring projects.)
+
+6. **Why does JPA exist as a spec instead of just `org.hibernate.*`?**
+   Stability of the interface lets implementations be swapped without rewriting application code, and prevents vendor lock-in.
+
+7. **What does `spring-boot-starter-data-jpa` actually bring in?**
+   Hibernate (the implementation), JPA API (the spec), Spring Data JPA (repositories), HikariCP (connection pool), JDBC support, and Spring's transaction management.
+
+8. **Trace what happens when you call `repository.save(entity)` for a new entity.**
+   Spring Data delegates to `EntityManager.persist()` → Hibernate registers it in the persistence context → at commit Hibernate generates an INSERT → JDBC sends it to the DB.
+
+9. **Why is JDBC at the bottom?**
+   It's Java's lowest-level DB API. Hibernate generates SQL strings and uses JDBC to execute them. You can use JDBC alone (`JdbcTemplate`) without any ORM if you want.
+
+10. **What's `EntityManager`?**
+    The main JPA interface. Methods include `persist`, `merge`, `find`, `remove`, `createQuery`. Hibernate provides the actual implementation, called `Session`.
 
 ---
 
@@ -111,7 +150,7 @@ public class Book {
 ### The non-negotiable rules
 
 - **`@Entity`** + a **no-arg constructor**. Hibernate uses reflection to instantiate, then fills fields. If the only constructor takes args, Hibernate cannot create the object. You can make the no-arg constructor `protected` to discourage direct use from app code.
-- **`@Id`** field, exactly one. Maps to the primary key.
+- **`@Id`** field, exactly one (or composite — see below). Maps to the primary key.
 - **The class must not be `final`**. Hibernate creates runtime proxies (subclasses) for lazy loading — it can't subclass a final class.
 - **Fields should not be `final`** for the same reason — Hibernate sets them via reflection.
 
@@ -160,7 +199,7 @@ private Long id;
 | Enum | `VARCHAR` (with `@Enumerated(EnumType.STRING)`) | Never use `ORDINAL` — adding an enum value reorders persisted ints. |
 | `byte[]` | `BYTEA` | Binary data. |
 
-**Enum example:**
+**Enum example — the ORDINAL trap:**
 
 ```java
 public enum OrderStatus { PENDING, PAID, SHIPPED, CANCELLED }
@@ -174,6 +213,64 @@ public class Order {
 ```
 
 If you used `EnumType.ORDINAL`, the DB would store `0,1,2,3`. The day someone inserts a new value `REFUNDED` between `PAID` and `SHIPPED`, every existing row gets a silently different meaning. **Always `EnumType.STRING`.**
+
+### Embedded value objects — `@Embeddable`
+
+Sometimes a group of fields logically belongs together but doesn't deserve its own table. Example: an address.
+
+```java
+@Embeddable
+public class Address {
+    @Column(name = "street", nullable = false)
+    private String street;
+
+    @Column(name = "city", nullable = false)
+    private String city;
+
+    @Column(name = "country", length = 2)
+    private String country;
+
+    protected Address() {}
+    public Address(String street, String city, String country) { ... }
+}
+
+@Entity
+public class Customer {
+    @Id @GeneratedValue Long id;
+    String name;
+
+    @Embedded
+    private Address address;   // flattens into customer table
+}
+```
+
+The resulting `customers` table has columns: `id, name, street, city, country`. The `Address` is just a Java grouping — no separate table, no FK, no JOIN.
+
+Use this for value objects that don't have identity of their own (an address belongs to *this* customer; if you change it, you don't update other customers' addresses).
+
+### Composite keys — `@EmbeddedId`
+
+When a table's primary key is multiple columns:
+
+```java
+@Embeddable
+public class EnrollmentId implements Serializable {
+    private Long studentId;
+    private Long courseId;
+
+    // equals & hashCode REQUIRED (composite keys must implement them)
+}
+
+@Entity
+public class Enrollment {
+    @EmbeddedId
+    private EnrollmentId id;
+
+    private LocalDate enrolledAt;
+}
+```
+
+The PK is the pair `(student_id, course_id)`. Use for many-to-many join tables (and the alternative `@IdClass` exists but `@EmbeddedId` is preferred).
 
 ### Relationships — the four cardinalities
 
@@ -240,9 +337,7 @@ public class Book {
 }
 ```
 
-Requires a join table. **In production, most teams replace `@ManyToMany` with an explicit join entity** (`BookTag`) because real-world join tables almost always grow extra columns (timestamps, who added the tag, etc.).
-
-**Explicit join entity pattern:**
+Requires a join table. **In production, most teams replace `@ManyToMany` with an explicit join entity** because real-world join tables almost always grow extra columns (timestamps, who added the tag, etc.).
 
 ```java
 @Entity
@@ -258,6 +353,37 @@ public class BookTag {
 ```
 
 Now `Book.tags` becomes `@OneToMany(mappedBy = "book") Set<BookTag>` and you can attach metadata to the association.
+
+### Cascade types — what happens to associated entities
+
+```java
+@OneToMany(mappedBy = "author", cascade = CascadeType.PERSIST)
+private List<Book> books;
+```
+
+Cascade tells Hibernate: "when I do operation X on the parent, also do it on the children."
+
+| Cascade | Effect |
+|---|---|
+| `PERSIST` | Saving parent saves new children. |
+| `MERGE` | Merging parent merges children. |
+| `REMOVE` | Deleting parent deletes children. **Dangerous on broad relationships.** |
+| `REFRESH` | Refreshing parent refreshes children. |
+| `DETACH` | Detaching parent detaches children. |
+| `ALL` | All of the above. |
+
+Plus `orphanRemoval = true` — if you remove a child from the parent's collection, delete it from the DB.
+
+**Realistic example:**
+
+```java
+@OneToMany(mappedBy = "order", cascade = {PERSIST, REMOVE}, orphanRemoval = true)
+private List<OrderLine> lines;
+```
+
+"When I save an Order, save its lines. When I delete an Order, delete its lines. If I remove a line from the list, delete it from the DB."
+
+Use cascade for tight parent-child relationships (Order → OrderLines). Don't use it across loose associations (Book → Author — deleting a book shouldn't delete the author).
 
 ### `equals` / `hashCode` — the trap
 
@@ -275,7 +401,7 @@ Two acceptable solutions:
 
 For most projects, **just don't put entities in `Set`s** and don't override equals/hashCode at all. It avoids the whole class of bugs.
 
-### Entity lifecycle states (Hibernate calls them this)
+### Entity lifecycle states
 
 | State | Meaning |
 |---|---|
@@ -313,11 +439,37 @@ public void renameBook(Long id, String newTitle) {
 
 This surprises people coming from raw JDBC. You mutate the object; Hibernate translates that into SQL automatically.
 
-**Common gotcha:** people call `bookRepo.save(b)` in the middle of a transaction, thinking it's required. It isn't, but it doesn't hurt either — for a managed entity, `save()` returns the same entity and dirty checking still does the work.
+### Chapter 2 — 10 self-quiz questions
 
-**Interviewer probe:** *"What's the difference between detached and transient?"*
+1. **What two things does every JPA entity need at minimum?**
+   `@Entity` annotation and a no-arg constructor (can be `protected`).
 
-> Transient has never been persisted. Detached has been persisted but the session that managed it has closed.
+2. **Why can't an entity be `final`?**
+   Hibernate generates runtime subclasses as proxies for lazy loading. Subclassing a final class isn't possible.
+
+3. **Difference between `IDENTITY` and `SEQUENCE` PK generation?**
+   `IDENTITY` uses an auto-increment column (DB assigns PK on INSERT, breaks batching). `SEQUENCE` uses a DB sequence (Hibernate gets the next value before INSERT, allows batching).
+
+4. **What's the problem with `EnumType.ORDINAL`?**
+   It stores enum values as ints based on declaration order. Inserting a new enum value mid-list silently changes the meaning of all stored rows.
+
+5. **What does `mappedBy` mean on `@OneToMany`?**
+   "I'm the inverse side; the other side (named here) owns the FK." Without it, Hibernate assumes you want a separate join table.
+
+6. **Which side owns the foreign key in a one-to-many relationship?**
+   The "many" side. The FK column lives on the child's table.
+
+7. **What's `@Embeddable` for?**
+   Grouping fields into a Java value object that's stored in the parent's table (no separate table or FK). Example: `Address` embedded in `Customer`.
+
+8. **What's `CascadeType.REMOVE` plus `orphanRemoval = true`?**
+   `REMOVE` deletes children when the parent is deleted. `orphanRemoval` deletes a child the moment you remove it from the parent's collection.
+
+9. **The four lifecycle states?**
+   Transient (never persisted), Managed (in session, tracked), Detached (was in session, session closed), Removed (marked for delete).
+
+10. **What is dirty checking?**
+    Hibernate keeps a snapshot of each managed entity's field values when loaded; at flush time it generates UPDATEs for fields that changed. You don't need to call `save()`.
 
 ---
 
@@ -361,7 +513,33 @@ This is why Hibernate can do batch inserts. It collects changes, then sends them
 
 **Caveat:** `IDENTITY` PK generation breaks this. Because the PK is assigned by the DB on INSERT, Hibernate has to INSERT immediately to know the ID. That's why `SEQUENCE` is preferred for high-write tables.
 
-### Second-level cache (not used in this project, but interviewable)
+### Flush modes
+
+| Mode | When Hibernate flushes |
+|---|---|
+| `AUTO` (default) | Before each query (to ensure query sees pending changes) and at commit. |
+| `COMMIT` | Only at commit. Queries may not see your pending changes. |
+| `MANUAL` | Only when you call `em.flush()` explicitly. |
+
+You almost always want `AUTO`. The other modes exist for niche optimization scenarios.
+
+### Identity guarantee — what it really means
+
+```java
+@Transactional
+public void demo() {
+    Book b1 = bookRepo.findById(42L).get();
+    Book b2 = bookRepo.findById(42L).get();
+    System.out.println(b1 == b2);     // true (same object reference!)
+    System.out.println(b1.equals(b2));  // true
+}
+```
+
+Inside one persistence context, you can't have two `Book` objects with id 42. The first `find` puts it in the cache; the second returns the cached one. No second DB query fires.
+
+**Outside** the persistence context, this guarantee is gone — two separate transactions loading book 42 get two separate objects.
+
+### Second-level cache (interview-relevant but not used here)
 
 The persistence context is per-transaction (first-level cache). Hibernate also supports a **second-level cache** that lives across transactions and even across nodes (with Ehcache, Hazelcast, Infinispan).
 
@@ -374,6 +552,65 @@ public class Country { ... }
 ```
 
 Use for read-mostly, slowly-changing reference data (currencies, country codes, configuration). Don't use for hot, frequently-written tables — cache invalidation gets painful.
+
+### `persist` vs `merge`
+
+```java
+em.persist(entity);   // Entity must be TRANSIENT. Throws if already managed.
+em.merge(entity);     // Entity can be DETACHED. Returns a MANAGED copy.
+```
+
+**`persist`** attaches a brand-new entity to the persistence context.
+
+**`merge`** is for detached entities — you got an entity from somewhere else (HTTP request, cache, whatever) and want to apply its state to a managed copy.
+
+```java
+@Transactional
+public Book updateBook(Book detachedBook) {
+    Book managed = em.merge(detachedBook);    // copies state, returns managed version
+    // 'detachedBook' is still detached after this!
+    // 'managed' is what you modify.
+    return managed;
+}
+```
+
+In Spring Data, `repository.save(entity)`:
+- If entity has no ID, calls `persist`.
+- If entity has an ID and isn't managed, calls `merge`.
+
+This is why `save()` "just works" for both new and updated entities.
+
+### Chapter 3 — 10 self-quiz questions
+
+1. **What is the persistence context?**
+   Hibernate's per-transaction cache of managed entities, with identity guarantee, dirty checking, write-behind, and first-level cache.
+
+2. **What does "identity guarantee" mean?**
+   Inside one persistence context, the same row is always represented by the same Java object instance — `==` comparison works.
+
+3. **Flush vs commit?**
+   Flush writes queued SQL to the DB. Commit ends the transaction. Flush can happen multiple times within a tx; commit only once.
+
+4. **When does Hibernate auto-flush?**
+   Before queries (so the query sees pending changes) and at commit. This is `FlushMode.AUTO`, the default.
+
+5. **What's write-behind?**
+   Hibernate queues SQL statements rather than firing them immediately, so they can be batched at flush time.
+
+6. **What breaks Hibernate batching for inserts?**
+   `IDENTITY` PK strategy — the DB assigns the PK on INSERT, so Hibernate must fire each INSERT separately to get the ID before queuing the next.
+
+7. **First-level vs second-level cache?**
+   First-level = persistence context, per-transaction, always on. Second-level = cross-transaction cache, opt-in per entity, requires a provider.
+
+8. **What's `persist` vs `merge`?**
+   `persist` attaches a new (transient) entity. `merge` copies a detached entity's state onto a managed copy and returns the managed one.
+
+9. **How long does the persistence context live?**
+   For the duration of the transaction. On commit, it's cleared and entities become detached (or garbage-collected).
+
+10. **Why does `em.find(Book.class, 42L)` twice in a transaction only hit the DB once?**
+    The first `find` loads the row and stores the entity in the persistence context. The second finds it in the cache and returns the same instance without a query.
 
 ---
 
@@ -457,28 +694,7 @@ int renameBook(@Param("id") Long id, @Param("title") String title);
 ```
 `@Modifying` is required for non-SELECT queries. Returns affected row count.
 
-**Projections — return DTOs, not entities:**
-
-Interface projection (Spring proxies it):
-```java
-public interface BookSummary {
-    String getTitle();
-    String getIsbn();
-}
-
-@Query("SELECT b.title AS title, b.isbn AS isbn FROM Book b")
-List<BookSummary> findAllSummaries();
-```
-
-Class-based projection (constructor expression):
-```java
-public record BookSummary(String title, String isbn) {}
-
-@Query("SELECT new com.foo.BookSummary(b.title, b.isbn) FROM Book b")
-List<BookSummary> findAllSummaries();
-```
-
-Projections are lighter — Hibernate loads only the columns you need, doesn't manage them in the persistence context.
+**Projections** — return DTOs, not entities. See chapter 5 for the full DTO/DAO discussion.
 
 ### Paging and sorting
 
@@ -499,23 +715,409 @@ result.hasNext();
 
 Spring Data fires two queries: one for the page contents (with LIMIT/OFFSET) and one for the total count. If you don't need the count, return `Slice<Book>` instead — skips the count query.
 
+| Return type | What it gives you | Cost |
+|---|---|---|
+| `List<T>` | Just the page contents | 1 query |
+| `Slice<T>` | Page contents + `hasNext()` | 1 query (fetches `pageSize + 1` to know if there's more) |
+| `Page<T>` | Page contents + total count + total pages | 2 queries |
+
+Use `Page` only when the UI shows "page X of Y." Use `Slice` for infinite scroll. Use `List` when no pagination semantics needed.
+
+### Specifications — dynamic queries
+
+For search/filter endpoints where any field might be present:
+
+```java
+public interface BookRepository extends JpaRepository<Book, Long>, JpaSpecificationExecutor<Book> {}
+```
+
+Define reusable conditions:
+
+```java
+public class BookSpecs {
+    public static Specification<Book> hasAuthor(Long authorId) {
+        return (root, query, cb) ->
+            authorId == null ? null : cb.equal(root.get("author").get("id"), authorId);
+    }
+
+    public static Specification<Book> titleContains(String fragment) {
+        return (root, query, cb) ->
+            fragment == null ? null : cb.like(cb.lower(root.get("title")), "%" + fragment.toLowerCase() + "%");
+    }
+
+    public static Specification<Book> publishedAfter(LocalDate date) {
+        return (root, query, cb) ->
+            date == null ? null : cb.greaterThan(root.get("publishedAt"), date);
+    }
+}
+```
+
+Compose at the call site:
+
+```java
+List<Book> results = bookRepo.findAll(
+    Specification.where(BookSpecs.hasAuthor(authorId))
+                 .and(BookSpecs.titleContains(title))
+                 .and(BookSpecs.publishedAfter(after))
+);
+```
+
+Each Spec returns `null` if its param is null → the WHERE clause skips that condition. Net result: one query with exactly the conditions the user asked for. Beats hand-writing 8 versions of the query.
+
 ### When NOT to use Spring Data
 
-For **highly dynamic queries** (search forms where any of 10 fields might be present), the method-name approach explodes. Use Criteria API or QueryDSL or just hand-write `EntityManager` queries.
+For **truly dynamic** queries (10 optional join paths, group-bys, having clauses) where Specifications get unwieldy, drop to `EntityManager.createQuery()` directly or use QueryDSL. Repositories are not a hammer for every nail.
 
-**Specifications** (a Spring Data feature) let you compose conditions dynamically:
-```java
-Specification<Book> spec = Specification
-    .where(hasTitle(title))
-    .and(hasAuthor(authorId))
-    .and(createdAfter(date));
-List<Book> results = bookRepo.findAll(spec);
-```
-Useful for filter/search endpoints. Niche but interviewable.
+### Chapter 4 — 10 self-quiz questions
+
+1. **How does Spring Data implement the `findByIsbn` method on a repository interface?**
+   At startup, Spring generates a proxy class. It parses the method name, builds a JPQL query (`SELECT b FROM Book b WHERE b.isbn = ?1`), and the generated method runs it.
+
+2. **What's the difference between `CrudRepository` and `JpaRepository`?**
+   `CrudRepository` is generic JPA-agnostic CRUD. `JpaRepository` extends it with JPA-specific methods (`flush`, `saveAndFlush`, batch operations).
+
+3. **When are bad method names caught?**
+   At startup. Spring parses each repository method name and validates it against the entity model. Typos in property names fail before the app accepts traffic.
+
+4. **What's `@Modifying` for?**
+   Marks `@Query` methods that aren't SELECT (UPDATE/DELETE). Without it, Spring tries to treat the query as a SELECT and fails. Returns affected row count.
+
+5. **What's the difference between `findByName` and `getByName`?**
+   None functionally — both prefixes work (and `readBy`, `queryBy`, `searchBy`). Pick one convention and stick with it.
+
+6. **Difference between `Page<T>` and `Slice<T>`?**
+   `Page` includes total count (fires a count query). `Slice` only knows if there's a next page (no count query). Use `Slice` for infinite scroll, `Page` for page X of Y UIs.
+
+7. **What does `@Query(nativeQuery = true)` mean?**
+   The string is raw SQL, not JPQL. Used when you need DB-specific features (CTEs, window functions, dialect-specific syntax).
+
+8. **What's a `Specification`?**
+   A reusable JPA Criteria predicate. Compose them with `and`/`or` to build dynamic queries at call time. Useful for search endpoints.
+
+9. **Can you do joins in a derived query name?**
+   Indirectly — `findByAuthor_Name` walks the `author.name` path. But for explicit `JOIN` (or `JOIN FETCH`) you need `@Query`.
+
+10. **When should you NOT use Spring Data repositories?**
+    When queries are so dynamic that Specifications get unreadable. Drop to `EntityManager`, QueryDSL, or jOOQ for that small percentage of cases.
 
 ---
 
-## 5. Transactions — the core mental model
+## 5. DTOs and DAOs
+
+Two of the most-confused terms in backend Java. Worth nailing.
+
+### DAO — Data Access Object
+
+A **DAO** is a class whose responsibility is *talking to the database*. It hides the persistence details from the rest of the app. Pre-Spring-Data, you wrote DAOs by hand:
+
+```java
+public class BookDao {
+    private final EntityManager em;
+
+    public BookDao(EntityManager em) { this.em = em; }
+
+    public Optional<Book> findById(Long id) {
+        return Optional.ofNullable(em.find(Book.class, id));
+    }
+
+    public List<Book> findByAuthor(Long authorId) {
+        return em.createQuery(
+            "SELECT b FROM Book b WHERE b.author.id = :a", Book.class)
+          .setParameter("a", authorId)
+          .getResultList();
+    }
+
+    public void save(Book b) { em.persist(b); }
+    public void delete(Book b) { em.remove(b); }
+}
+```
+
+That's a DAO: it encapsulates database access. The rest of the app calls `bookDao.findById(42L)` and doesn't know about `EntityManager` or JPQL.
+
+**In modern Spring Data, the repository interface IS the DAO.**
+
+```java
+public interface BookRepository extends JpaRepository<Book, Long> {
+    Optional<Book> findByIsbn(String isbn);
+}
+```
+
+Same responsibility — hide DB details, expose domain operations. The class you no longer write by hand because Spring generates it.
+
+So when someone asks "where are the DAOs?" in a Spring Boot project, the answer is usually "we use Spring Data repositories — those play the DAO role."
+
+**One sentence:** *DAO = the layer that knows how to read/write data.*
+
+### DTO — Data Transfer Object
+
+A **DTO** is a dumb object whose job is to **move data across boundaries** — between layers, across HTTP, across the wire. No business logic, no JPA annotations, no Hibernate connection. Just fields, getters, and (optionally) constructors.
+
+**Why DTOs exist:**
+
+You don't want to send your `@Entity` `Book` straight out over HTTP. Reasons:
+
+1. **It might have associations that lazy-load.** Jackson serializing `book.getAuthor().getName()` while the session is closed = `LazyInitializationException`.
+2. **It exposes internal fields you didn't want public.** Internal flags, soft-delete markers, audit columns.
+3. **It couples your API to your DB schema.** Rename a column → break clients.
+4. **The DB model doesn't match what clients want.** Often you join multiple entities, transform, compute fields.
+
+So you define a separate class:
+
+```java
+public record BookResponse(
+    Long id,
+    String title,
+    String isbn,
+    String authorName,
+    LocalDate publishedAt
+) {}
+```
+
+That's a DTO. A Java record (or a plain class with fields, getters, constructor). No annotations beyond maybe Jackson's. No mention of Hibernate.
+
+### A complete DTO/Entity/DAO example
+
+**The entity** (DB-shape, internal):
+
+```java
+@Entity
+@Table(name = "books")
+public class Book {
+    @Id @GeneratedValue Long id;
+
+    @Column(nullable = false)
+    private String title;
+
+    @Column(nullable = false, unique = true)
+    private String isbn;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "author_id")
+    private Author author;
+
+    @Column
+    private LocalDate publishedAt;
+
+    @Column(name = "deleted_at")
+    private Instant deletedAt;   // internal soft-delete marker
+
+    @Version
+    private Long version;        // internal optimistic-lock field
+}
+```
+
+**The DAO** (repository):
+
+```java
+public interface BookRepository extends JpaRepository<Book, Long> {
+    Optional<Book> findByIsbnAndDeletedAtIsNull(String isbn);
+}
+```
+
+**The request DTO** (what clients send to create a book):
+
+```java
+public record CreateBookRequest(
+    @NotBlank @Size(max = 200) String title,
+    @NotBlank @Pattern(regexp = "\\d{13}") String isbn,
+    @NotNull Long authorId,
+    LocalDate publishedAt
+) {}
+```
+
+**The response DTO** (what clients get back):
+
+```java
+public record BookResponse(
+    Long id,
+    String title,
+    String isbn,
+    String authorName,
+    LocalDate publishedAt
+) {}
+```
+
+**The service** (translates between them):
+
+```java
+@Service
+@Transactional
+public class BookService {
+
+    private final BookRepository bookRepo;
+    private final AuthorRepository authorRepo;
+
+    public BookResponse create(CreateBookRequest req) {
+        Author author = authorRepo.findById(req.authorId()).orElseThrow();
+        Book book = new Book();
+        book.setTitle(req.title());
+        book.setIsbn(req.isbn());
+        book.setAuthor(author);
+        book.setPublishedAt(req.publishedAt());
+        bookRepo.save(book);
+        return toResponse(book);
+    }
+
+    @Transactional(readOnly = true)
+    public BookResponse get(Long id) {
+        Book b = bookRepo.findById(id).orElseThrow();
+        return toResponse(b);
+    }
+
+    private BookResponse toResponse(Book b) {
+        return new BookResponse(
+            b.getId(),
+            b.getTitle(),
+            b.getIsbn(),
+            b.getAuthor().getName(),
+            b.getPublishedAt()
+        );
+    }
+}
+```
+
+**The controller**:
+
+```java
+@RestController
+@RequestMapping("/api/books")
+public class BookController {
+
+    private final BookService bookService;
+
+    @PostMapping
+    public ResponseEntity<BookResponse> create(@Valid @RequestBody CreateBookRequest req) {
+        BookResponse body = bookService.create(req);
+        return ResponseEntity.status(201).body(body);
+    }
+
+    @GetMapping("/{id}")
+    public BookResponse get(@PathVariable Long id) {
+        return bookService.get(id);
+    }
+}
+```
+
+Notice what's *not* in the controller:
+- No `Book` entity. Entities never leave the service layer.
+- No `@Transactional`. Controllers don't manage transactions.
+- No DB queries. Just request → service → response.
+
+### DTO patterns — variations you'll see
+
+#### Request DTO with validation
+
+```java
+public record CreateOrderRequest(
+    @NotNull Long customerId,
+    @NotEmpty List<@Valid OrderLineDto> lines
+) {}
+
+public record OrderLineDto(
+    @NotNull Long productId,
+    @Min(1) int quantity
+) {}
+```
+
+`@Valid` cascades validation into nested objects. Combined with `@Valid` in the controller method signature, all validation runs before your service method is called.
+
+#### Response DTO — flatten/transform
+
+```java
+public record OrderSummary(
+    Long id,
+    String customerName,      // joined from Customer entity
+    int lineCount,            // computed from collection
+    BigDecimal totalAmount,   // computed
+    String status
+) {}
+```
+
+Often a response DTO doesn't 1:1 match any entity — it's a view tailored to a use case.
+
+#### Multiple DTOs for the same entity
+
+It's normal to have:
+- `BookSummary` — id + title (for list views)
+- `BookResponse` — full single-book view
+- `CreateBookRequest` — incoming new book
+- `UpdateBookRequest` — incoming changes
+
+The DB has one `Book` table. The API has four representations.
+
+### Mapping: by hand vs MapStruct
+
+The toResponse-style method works for small projects. For larger ones, **MapStruct** generates these mappers at compile time:
+
+```java
+@Mapper(componentModel = "spring")
+public interface BookMapper {
+    BookResponse toResponse(Book book);
+}
+```
+
+MapStruct reads the method signature and generates a class that copies fields by name. Zero runtime cost. Worth knowing the name even if you don't use it.
+
+Alternatives: ModelMapper (reflection-based, slower), or just hand-written mappers (best for small projects).
+
+### Why a clean DTO boundary matters
+
+Without DTOs, every API change becomes risky:
+
+> Bad scenario: Controller returns `Book` entity. Frontend depends on its JSON shape. Someone renames a column. The migration also requires renaming the entity field. Now the API contract silently changed for every client.
+
+With DTOs:
+
+> Migration renames a column → entity field renamed → mapper updated to map new entity field to same response DTO field. **API contract unchanged.** Clients see no difference.
+
+DTOs let the API contract evolve independently of the DB schema. Same principle in reverse: schema can change without rippling out to client breakage.
+
+### Rule of thumb
+
+> **Never let an `@Entity` cross a layer boundary you don't control.**
+
+- Entity → repository: fine.
+- Entity → service: fine.
+- Entity → controller: fine (controller passes to mapper, which produces DTO).
+- Entity → HTTP response: **no**. Wrap in DTO.
+- Entity → message queue: **no**. Use a DTO/event class.
+- Entity stored in HTTP session / cache: **no**. Detaches it, lazy loading dies.
+
+### Chapter 5 — 10 self-quiz questions
+
+1. **What's a DAO?**
+   Data Access Object — the class/layer that talks to the database, hiding persistence details from callers. In Spring Data, the repository interface plays this role.
+
+2. **What's a DTO?**
+   Data Transfer Object — a dumb object with fields and getters, used to move data across boundaries (especially API boundaries). No JPA, no business logic.
+
+3. **Why not return JPA entities directly from controllers?**
+   Lazy-loading risks (`LazyInitializationException` during serialization), exposes internal fields, couples API shape to DB schema, makes schema changes break clients.
+
+4. **What's the difference between a request DTO and a response DTO?**
+   Request DTOs carry input from the client (validated with Bean Validation annotations). Response DTOs carry output to the client (often flatten or compute fields from entities).
+
+5. **Why do request DTOs have validation annotations and entities usually don't?**
+   Validation is an input-boundary concern. Once data is in the DB, it's already valid. Validating again on every load is wasteful.
+
+6. **Is a repository the same thing as a DAO?**
+   Conceptually yes — both are the data-access layer. "DAO" is the older pattern name; "repository" is the modern Spring Data term.
+
+7. **What does `@Valid` on a controller parameter do?**
+   Triggers Bean Validation on the request DTO. If validation fails, Spring throws `MethodArgumentNotValidException` before the controller body runs.
+
+8. **Where does the conversion entity → DTO happen?**
+   In the service layer (cleanest) or a dedicated mapper class. Never in the controller or repository.
+
+9. **What does MapStruct do?**
+   Generates entity ↔ DTO mapper implementations at compile time. Faster than reflection-based mappers, type-safe.
+
+10. **Why is "never let an `@Entity` cross a layer boundary you don't control" a useful rule?**
+    Entities have lifecycle, lazy state, version columns, and DB coupling. The further they travel, the more places those concerns leak. DTOs are inert and safe to send anywhere.
+
+---
+
+## 6. Transactions — the core mental model
 
 A transaction = a unit of DB work that either all commits or all rolls back. Properties (the ACID acronym):
 
@@ -640,6 +1242,23 @@ class AuditService {
         auditRepo.save(new AuditEntry(event));
     }
 }
+
+@Service
+class OrderService {
+    @Autowired AuditService auditService;
+
+    @Transactional
+    public void placeOrder(...) {
+        try {
+            // ... do order work ...
+            auditService.log("Order placed");   // commits in its own tx
+        } catch (Exception e) {
+            auditService.log("Order failed");   // ALSO commits, even though
+                                                 // outer tx will rollback
+            throw e;
+        }
+    }
+}
 ```
 
 Even if the calling service's transaction rolls back, the audit entry was committed in its own separate transaction. Useful for "I want to record that this failure happened."
@@ -715,11 +1334,41 @@ Returns row count. If 0, you know stock was already 0 or the row was gone. No ra
 
 The third one is usually the cleanest for counters.
 
-**Interviewer probe:** *"How do you handle two users trying to place the last item in stock at the same time?"* — pick one of the three above and explain why it fits the scenario.
+### Chapter 6 — 10 self-quiz questions
+
+1. **ACID — what does each letter mean?**
+   Atomicity (all-or-nothing), Consistency (constraints hold), Isolation (txs don't see each other's intermediate state), Durability (committed data survives).
+
+2. **Why put `@Transactional` on services not controllers or repositories?**
+   Controllers are HTTP-shaped; transactions are DB-shaped. Repositories are too granular — every save would be a separate tx. The service is the natural business-operation boundary.
+
+3. **What's the self-invocation problem?**
+   Calling a `@Transactional` method on `this` (same class) bypasses the Spring proxy that implements the annotation. The transaction isn't started.
+
+4. **Which exceptions roll back the transaction by default?**
+   `RuntimeException` and `Error`. Checked exceptions commit unless `rollbackFor` says otherwise.
+
+5. **What does `@Transactional(readOnly = true)` do?**
+   Tells Hibernate to skip dirty checking and the DB driver to optimize for reads. Use on query methods.
+
+6. **What's the default propagation, and what does it do?**
+   `REQUIRED`: join the existing transaction if one exists; otherwise start a new one.
+
+7. **When would you use `REQUIRES_NEW`?**
+   When you need the inner method to commit even if the outer transaction rolls back — classic case is audit logging.
+
+8. **Postgres default isolation level?**
+   READ COMMITTED. You can only see other transactions' committed data.
+
+9. **Difference between optimistic and pessimistic locking?**
+   Optimistic: no DB locks; check `@Version` at write time, fail if mismatch, retry. Pessimistic: `SELECT ... FOR UPDATE` locks the row; other writers wait.
+
+10. **What does `@Version` do mechanically?**
+    Hibernate adds `WHERE version = ?` to UPDATEs and bumps the version. Row count 0 means another tx modified it — throws `OptimisticLockException`.
 
 ---
 
-## 6. Fetch types, lazy/eager, OSIV, N+1
+## 7. Fetch types, lazy/eager, OSIV, N+1
 
 ### The four association annotations and their defaults
 
@@ -883,13 +1532,41 @@ Why this was introduced: in the early Spring days, templates (JSP/Thymeleaf) fre
 
 When you switch it off and your existing code breaks with `LazyInitializationException`, those breakages are **diagnostic** — they reveal places that were doing accidental DB work. Fix each one with a fetch join or DTO projection.
 
-**Interviewer probe:** *"What's OSIV, and why is it controversial?"*
+### Chapter 7 — 10 self-quiz questions
 
-> It keeps the Hibernate session open for the whole request lifecycle so views and controllers can lazily load. It's controversial because it hides where queries fire, allows N+1s to escape detection during reviews, blurs transaction boundaries, and holds connections longer than needed. Most teams turn it off and load explicitly inside transactional services.
+1. **Default fetch type for `@OneToMany`?**
+   LAZY. The collection is loaded only when first touched.
+
+2. **Default fetch type for `@ManyToOne`?**
+   EAGER (surprising). Most teams override to LAZY in practice.
+
+3. **What's a Hibernate proxy?**
+   A runtime-generated subclass of an entity that stands in for the real one until you touch it. Holds the session reference and triggers a SELECT on first field access.
+
+4. **What causes `LazyInitializationException`?**
+   Touching a lazy association after its session/persistence context has closed. The proxy can't fetch without a live session.
+
+5. **What's the N+1 problem in one sentence?**
+   You load N parent rows, and accessing a lazy association on each fires one additional query per parent — total queries = 1 + N.
+
+6. **Four ways to fix N+1?**
+   `JOIN FETCH` in JPQL, `@EntityGraph`, `@BatchSize`, or DTO projections that select only needed fields.
+
+7. **What's `MultipleBagFetchException`?**
+   Hibernate refuses to JOIN FETCH two `@OneToMany` `List` collections at once because the Cartesian product is ambiguous. Fix: use `Set`, or split into separate queries.
+
+8. **What's wrong with `JOIN FETCH` plus `Page<T>`?**
+   When fetching a collection, Hibernate can't apply LIMIT/OFFSET correctly — it loads everything into memory and paginates there. Disaster on large datasets.
+
+9. **What's OSIV and why is it controversial?**
+   Open Session in View — keeps the persistence context open for the whole HTTP request. Hides where queries fire, encourages N+1, breaks transactional clarity. Most teams turn it off.
+
+10. **Difference between `@BatchSize` and fetch join?**
+    Fetch join loads associations in the same query (one SQL statement). `@BatchSize` batches many lazy-loads into IN-queries (multiple statements but far fewer than N+1). Fetch join is more precise; batch is a safety net.
 
 ---
 
-## 7. Flyway — schema as code
+## 8. Flyway — schema as code
 
 ### The problem Flyway solves
 
@@ -984,6 +1661,30 @@ CREATE INDEX CONCURRENTLY idx_books_created_at ON books(created_at);
 
 `CONCURRENTLY` lets the index build without locking writes. Hibernate's `ddl-auto` cannot do this. Real production schema work requires this kind of control.
 
+**Repeatable migration for a view:**
+
+```sql
+-- R__books_with_authors_view.sql
+CREATE OR REPLACE VIEW books_with_authors AS
+SELECT b.id, b.title, a.name AS author_name
+FROM books b JOIN authors a ON a.id = b.author_id;
+```
+
+Filename starts with `R__`. Flyway reruns this whenever its checksum changes (so editing the view triggers a re-run, unlike versioned migrations).
+
+### Baseline — adopting Flyway on an existing DB
+
+When you start using Flyway on a DB that already has tables, you don't want Flyway to try to recreate everything. You **baseline**:
+
+```yaml
+spring:
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 0
+```
+
+Flyway records a baseline row in `flyway_schema_history` at version 0, and only applies migrations with version > 0. Your existing schema is treated as "already there."
+
 ### Flyway vs Liquibase
 
 | | Flyway | Liquibase |
@@ -1026,9 +1727,41 @@ Same pattern applies to:
 - Splitting a table.
 - Moving data to a new structure.
 
+### Chapter 8 — 10 self-quiz questions
+
+1. **What does Flyway do at app startup?**
+   Reads `flyway_schema_history`, compares to migration files on classpath, applies any not yet run in version order, records each successful run.
+
+2. **What's the filename format for a versioned migration?**
+   `V<version>__<description>.sql` with two underscores between version and description.
+
+3. **What's a repeatable migration?**
+   A file named `R__<description>.sql` that re-runs whenever its checksum changes. For views, stored procs, seed data.
+
+4. **What happens if you edit an applied migration?**
+   On next startup, Flyway computes a different checksum from what's recorded → throws a validation error → app refuses to start.
+
+5. **How do you recover from a failed migration?**
+   Manually fix the DB (often Flyway has rolled the SQL back already, but the row in history is marked failed); delete the failed row from `flyway_schema_history` or use `mvn flyway:repair`; restart.
+
+6. **Why is `ddl-auto=update` banned in production-grade projects?**
+   It only adds (never drops), runs invisibly at app startup, can't express advanced DDL (concurrent indexes, partial indexes, triggers), and races with itself across multi-node deployments.
+
+7. **What's expand-migrate-contract?**
+   The zero-downtime schema change pattern: add new alongside old, backfill, switch reads, stop writes to old, drop old. Multiple deploys instead of one big-bang change.
+
+8. **Flyway vs Liquibase — when would you pick Liquibase?**
+   When you need cross-DB compatibility (same migrations on Postgres and Oracle), built-in rollback machinery, or richer change set expression (XML/YAML).
+
+9. **What does `baseline-on-migrate` do?**
+   Lets Flyway adopt an existing DB by treating its current schema as the baseline. Migrations with versions ≤ baseline are skipped.
+
+10. **What does `CREATE INDEX CONCURRENTLY` give you over a plain `CREATE INDEX`?**
+    Builds the index without taking a write lock on the table. Crucial in production where you can't pause writes during a long index build.
+
 ---
 
-## 8. Common errors and what they mean
+## 9. Common errors and what they mean
 
 A reference for when stack traces look scary.
 
@@ -1085,15 +1818,21 @@ A reference for when stack traces look scary.
 
 **Fix:** Put repositories in a subpackage of where `@SpringBootApplication` lives, or add `@EnableJpaRepositories("com.foo.repos")`.
 
-### Flyway `FlywayValidateException: Validate failed: Migration checksum mismatch`
+### Flyway `FlywayValidateException: Migration checksum mismatch`
 
 **Cause:** You edited an applied migration file.
 
 **Fix:** Revert the edit and add a new migration with the change. As a last resort in dev: `mvn flyway:repair` to update the checksum, but never do this on prod data.
 
+### `MethodArgumentNotValidException`
+
+**Cause:** A request DTO with `@Valid` failed Bean Validation. Default Spring response is 400 with validation details.
+
+**Fix:** In a `@RestControllerAdvice`, handle this and produce a structured error response (Phase 2 covers this).
+
 ---
 
-## 9. Interview probes you should be ready for
+## 10. Interview probes you should be ready for
 
 - "Explain N+1 and how to fix it."
 - "What's the difference between `JOIN` and `JOIN FETCH` in JPQL?"
@@ -1118,16 +1857,20 @@ A reference for when stack traces look scary.
 - "What's the difference between `EntityManager.persist` and `EntityManager.merge`?"
   - `persist` requires a transient entity (no ID). Throws if the entity is already managed or has a conflicting ID.
   - `merge` takes a detached entity and copies its state onto a managed version, returning the managed copy. Use when you're given an entity from outside the persistence context.
+- "Why use DTOs at the API boundary?"
+- "What is a DAO in modern Spring?"
 
 If you can answer each of those in 2-3 sentences without hedging, you have Phase 1 nailed.
 
 ---
 
-## 10. Glossary
+## 11. Glossary
 
 | Term | Meaning |
 |---|---|
 | **Entity** | A class mapped to a DB table via `@Entity`. |
+| **DAO** | Data Access Object — the layer that talks to the DB. In modern Spring, the repository interface plays this role. |
+| **DTO** | Data Transfer Object — a dumb object carrying data across layer/API boundaries. No JPA annotations, no business logic. |
 | **Persistence context** | Hibernate's per-transaction cache of managed entities. |
 | **EntityManager** | The JPA-level interface for persistence operations. In Hibernate, backed by a `Session`. |
 | **Session** | Hibernate's equivalent of `EntityManager`. Lifetime = transaction (usually). |
@@ -1160,7 +1903,12 @@ If you can answer each of those in 2-3 sentences without hedging, you have Phase
 | **Checksum mismatch** | You edited an already-applied migration file. Forbidden. |
 | **`ddl-auto`** | Hibernate property controlling schema management. Use `validate` in production. |
 | **Expand-migrate-contract** | Zero-downtime schema change pattern. |
-| **DTO** | Data Transfer Object — plain class with no JPA annotations, used at API boundaries or for projections. |
+| **`@Embeddable` / `@Embedded`** | Group of fields flattened into the parent's table. Value object with no own table. |
+| **`@EmbeddedId`** | Composite primary key represented by an embeddable. |
+| **Cascade** | Propagate persistence operations from parent to children (PERSIST, MERGE, REMOVE, etc.). |
+| **`orphanRemoval`** | Auto-delete child rows when removed from the parent's collection. |
+| **MapStruct** | Annotation processor that generates entity ↔ DTO mappers at compile time. |
+| **Specification** | Reusable JPA Criteria predicate; compose for dynamic queries. |
 | **Projection** | Loading only a subset of columns into a DTO instead of a full entity. |
 
 ---
