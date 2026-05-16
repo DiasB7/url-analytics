@@ -1,14 +1,14 @@
 package com.example.urlanalytics.service;
 
-import com.example.urlanalytics.Exception.ShortCodeNotFoundException;
-import com.example.urlanalytics.Exception.UrlExpiredException;
+import com.example.urlanalytics.exception.ShortCodeNotFoundException;
+import com.example.urlanalytics.exception.UrlExpiredException;
 import com.example.urlanalytics.dto.CreateShortUrlRequest;
 import com.example.urlanalytics.dto.ShortUrlResponse;
 import com.example.urlanalytics.dto.StatsResponse;
 import com.example.urlanalytics.entity.ShortUrl;
 import com.example.urlanalytics.repository.ClickEventRepository;
 import com.example.urlanalytics.repository.ShortUrlRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,7 +21,7 @@ import java.time.Instant;
 public class UrlService {
     private final ShortUrlRepository shortUrlRepository;
     private final ClickEventRepository clickEventRepository;
-    private final ShortCodeService shortCodeService;
+    private final ShortCodeGenerator shortCodeGenerator;
 
     @Value("${app.base-url}")
     private String BASE_URL;
@@ -29,19 +29,19 @@ public class UrlService {
     private static final Logger log = LoggerFactory.getLogger(UrlService.class);
     private final static int MAX_ATTEMPTS = 10;
 
-    public UrlService(ShortUrlRepository shortUrlRepository, ClickEventRepository clickEventRepository, ShortCodeService shortCodeService) {
+    public UrlService(ShortUrlRepository shortUrlRepository, ClickEventRepository clickEventRepository, ShortCodeGenerator shortCodeGenerator) {
         this.shortUrlRepository = shortUrlRepository;
         this.clickEventRepository = clickEventRepository;
-        this.shortCodeService = shortCodeService;
+        this.shortCodeGenerator = shortCodeGenerator;
     }
 
     @Transactional
     public ShortUrlResponse create(CreateShortUrlRequest req) {
         //business validation: future longUrl check for blocked domain and etc.
         for (int i = 0; i<MAX_ATTEMPTS; i++) {
-            String code = shortCodeService.generate();
+            String code = shortCodeGenerator.generate();
             try {
-                ShortUrl shortUrl = new ShortUrl(code, req.LongUrl(), req.expiresAt());
+                ShortUrl shortUrl = new ShortUrl(code, req.longUrl(), req.expiresAt());
                 ShortUrl saved = shortUrlRepository.saveAndFlush(shortUrl);
                 return toShortUrlResponse(saved);
             } catch (DataIntegrityViolationException e) {
@@ -62,16 +62,17 @@ public class UrlService {
         );
     }
 
+    @Transactional(readOnly = true)
     public String resolve(String shortCode) {
         ShortUrl url = shortUrlRepository.findByShortCode(shortCode)
                 .orElseThrow(() -> new ShortCodeNotFoundException(shortCode));
-        if (url.getExpiresAt().isBefore(Instant.now())) {
+        if (url.getExpiresAt() != null && url.getExpiresAt().isBefore(Instant.now())) {
             throw new UrlExpiredException();
         }
         return url.getLongUrl();
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public StatsResponse getStats(String shortCode) {
         ShortUrl url = shortUrlRepository.findByShortCode(shortCode)
                 .orElseThrow(() -> new ShortCodeNotFoundException(shortCode));

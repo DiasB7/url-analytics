@@ -1,4 +1,4 @@
-package com.example.urlanalytics.Exception;
+package com.example.urlanalytics.exception;
 
 public class UrlExpiredException extends RuntimeException {
     public UrlExpiredException() {

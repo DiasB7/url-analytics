@@ -1,4 +1,4 @@
-package com.example.urlanalytics.Exception;
+package com.example.urlanalytics.exception;
 
 public class ShortCodeNotFoundException extends RuntimeException {
     public ShortCodeNotFoundException(String code) {
