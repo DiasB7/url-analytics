@@ -1,5 +1,7 @@
 package com.example.urlanalytics.service;
 
+import com.example.urlanalytics.Exception.ShortCodeNotFoundException;
+import com.example.urlanalytics.Exception.UrlExpiredException;
 import com.example.urlanalytics.dto.CreateShortUrlRequest;
 import com.example.urlanalytics.dto.ShortUrlResponse;
 import com.example.urlanalytics.entity.ShortUrl;
@@ -7,15 +9,21 @@ import com.example.urlanalytics.repository.ShortUrlRepository;
 import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+
+import java.time.Instant;
 
 @Service
 public class UrlService {
     private final ShortUrlRepository repo;
     private final ShortCodeService shortCodeService;
+
+    @Value("${app.base-url}")
+    private String BASE_URL;
+
     private static final Logger log = LoggerFactory.getLogger(UrlService.class);
-    private final static String BASE_URL = "http://localhost:8080/";
     private final static int MAX_ATTEMPTS = 10;
 
     public UrlService(ShortUrlRepository shortUrlRepository, ShortCodeService shortCodeService) {
@@ -48,5 +56,16 @@ public class UrlService {
                 saved.getCreatedAt(),
                 saved.getExpiresAt()
         );
+    }
+
+    public String resolve(String shortCode) {
+        ShortUrl url = repo.findByShortCode(shortCode);
+        if (url == null) {
+            throw new ShortCodeNotFoundException(shortCode);
+        }
+        if (url.getExpiresAt().isBefore(Instant.now())) {
+            throw new UrlExpiredException();
+        }
+        return url.getLongUrl();
     }
 }
