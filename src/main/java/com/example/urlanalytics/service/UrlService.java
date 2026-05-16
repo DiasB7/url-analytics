@@ -4,7 +4,9 @@ import com.example.urlanalytics.Exception.ShortCodeNotFoundException;
 import com.example.urlanalytics.Exception.UrlExpiredException;
 import com.example.urlanalytics.dto.CreateShortUrlRequest;
 import com.example.urlanalytics.dto.ShortUrlResponse;
+import com.example.urlanalytics.dto.StatsResponse;
 import com.example.urlanalytics.entity.ShortUrl;
+import com.example.urlanalytics.repository.ClickEventRepository;
 import com.example.urlanalytics.repository.ShortUrlRepository;
 import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
@@ -17,7 +19,8 @@ import java.time.Instant;
 
 @Service
 public class UrlService {
-    private final ShortUrlRepository repo;
+    private final ShortUrlRepository shortUrlRepository;
+    private final ClickEventRepository clickEventRepository;
     private final ShortCodeService shortCodeService;
 
     @Value("${app.base-url}")
@@ -26,8 +29,9 @@ public class UrlService {
     private static final Logger log = LoggerFactory.getLogger(UrlService.class);
     private final static int MAX_ATTEMPTS = 10;
 
-    public UrlService(ShortUrlRepository shortUrlRepository, ShortCodeService shortCodeService) {
-        this.repo = shortUrlRepository;
+    public UrlService(ShortUrlRepository shortUrlRepository, ClickEventRepository clickEventRepository, ShortCodeService shortCodeService) {
+        this.shortUrlRepository = shortUrlRepository;
+        this.clickEventRepository = clickEventRepository;
         this.shortCodeService = shortCodeService;
     }
 
@@ -38,8 +42,8 @@ public class UrlService {
             String code = shortCodeService.generate();
             try {
                 ShortUrl shortUrl = new ShortUrl(code, req.LongUrl(), req.expiresAt());
-                ShortUrl saved = repo.saveAndFlush(shortUrl);
-                return toResponse(saved);
+                ShortUrl saved = shortUrlRepository.saveAndFlush(shortUrl);
+                return toShortUrlResponse(saved);
             } catch (DataIntegrityViolationException e) {
                 log.error("unique collision — retry");
             }
@@ -47,7 +51,7 @@ public class UrlService {
         throw new IllegalStateException("could not generate unique code after " + MAX_ATTEMPTS);
     }
 
-    private ShortUrlResponse toResponse(ShortUrl saved) {
+    private ShortUrlResponse toShortUrlResponse(ShortUrl saved) {
         return new ShortUrlResponse(
                 saved.getId(),
                 saved.getShortCode(),
@@ -59,13 +63,28 @@ public class UrlService {
     }
 
     public String resolve(String shortCode) {
-        ShortUrl url = repo.findByShortCode(shortCode);
-        if (url == null) {
-            throw new ShortCodeNotFoundException(shortCode);
-        }
+        ShortUrl url = shortUrlRepository.findByShortCode(shortCode)
+                .orElseThrow(() -> new ShortCodeNotFoundException(shortCode));
         if (url.getExpiresAt().isBefore(Instant.now())) {
             throw new UrlExpiredException();
         }
         return url.getLongUrl();
+    }
+
+    @Transactional
+    public StatsResponse getStats(String shortCode) {
+        ShortUrl url = shortUrlRepository.findByShortCode(shortCode)
+                .orElseThrow(() -> new ShortCodeNotFoundException(shortCode));
+        long totalClicks = clickEventRepository.countByShortUrlId(url.getId());
+        return toStateResponse(url, totalClicks);
+    }
+
+    private StatsResponse toStateResponse(ShortUrl url, Long totalClicks) {
+        return new StatsResponse(
+                url.getShortCode(),
+                url.getLongUrl(),
+                totalClicks,
+                url.getCreatedAt()
+        );
     }
 }

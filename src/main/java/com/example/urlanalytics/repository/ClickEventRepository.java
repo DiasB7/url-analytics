@@ -6,4 +6,5 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public interface ClickEventRepository extends JpaRepository<ClickEvent, Long> {
+    long countByShortUrlId(Long id);
 }
